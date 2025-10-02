@@ -1,0 +1,43 @@
+pseudo-code/
+├── README.md                                  # Main project overview (Korean/English)
+├── .gitignore                                 # Git ignore patterns
+│
+├── docs/                                      # Documentation directory
+│   ├── QUICKSTART.md                         # Quick start guide
+│   ├── detection_guide.md                    # Detailed EDR detection guide
+│   └── TEST_COVERAGE.md                      # Test coverage matrix
+│
+├── samples/                                   # Test samples directory
+│   ├── process_injection/                    # Process injection techniques
+│   │   ├── README.md                         # Process injection guide
+│   │   ├── dll_injection.cpp                 # DLL Injection (T1055.001)
+│   │   ├── process_hollowing.cpp             # Process Hollowing (T1055.012)
+│   │   └── apc_injection.cpp                 # APC Injection (T1055.004)
+│   │
+│   ├── fileless/                             # Fileless techniques
+│   │   ├── README.md                         # Fileless guide
+│   │   ├── memory_execution.ps1              # PowerShell memory execution (T1059.001)
+│   │   └── wmi_execution.ps1                 # WMI execution (T1047)
+│   │
+│   ├── shellcode/                            # Shellcode injection
+│   │   └── shellcode_injection.cpp           # Shellcode injection (T1055)
+│   │
+│   └── combined/                             # Combined/multi-stage attacks
+│       └── multi_stage_attack.cpp            # Multi-stage attack simulation
+│
+├── workflows/                                 # Automated test workflows
+│   ├── automated_test.ps1                    # Basic automated testing
+│   └── advanced_test.ps1                     # Advanced testing with HTML reports
+│
+└── scripts/                                   # Build and utility scripts
+    └── build.ps1                             # Compilation script
+
+Summary:
+- 7 C++ samples (process injection, shellcode, multi-stage)
+- 2 PowerShell samples (fileless techniques)
+- 3 workflow automation scripts
+- 6 comprehensive documentation files
+- Covers 8+ MITRE ATT&CK techniques
+- Korean/English bilingual
+- ~2000+ lines of code
+- Complete EDR testing framework
