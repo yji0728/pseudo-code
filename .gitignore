@@ -1,0 +1,98 @@
+# Compiled executables
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Object files
+*.obj
+*.o
+*.ko
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Debug files
+*.pdb
+*.ilk
+*.exp
+*.map
+*.dSYM/
+*.su
+*.idb
+
+# Visual Studio
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.VC.db
+*.VC.opendb
+.vs/
+Debug/
+Release/
+x64/
+x86/
+
+# Test results and logs
+*.log
+edr_test_results.log
+test_results/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# PowerShell transcript logs
+PowerShell_transcript*.txt
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# Backup files
+*.bak
+*.backup
+
+# Build artifacts
+build/
+dist/
+out/
+
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Folder config file
+Desktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Mac files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python (if any test scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
