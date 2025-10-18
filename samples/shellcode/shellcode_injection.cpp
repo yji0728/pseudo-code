@@ -17,6 +17,40 @@
 #include <windows.h>
 #include <iostream>
 
+// RAII wrapper for HANDLE to ensure automatic cleanup
+class HandleGuard {
+private:
+    HANDLE handle;
+    
+public:
+    HandleGuard(HANDLE h) : handle(h) {}
+    ~HandleGuard() {
+        if (handle && handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+    
+    HANDLE get() const { return handle; }
+    bool isValid() const { return handle && handle != INVALID_HANDLE_VALUE; }
+    
+    // Prevent copying
+    HandleGuard(const HandleGuard&) = delete;
+    HandleGuard& operator=(const HandleGuard&) = delete;
+};
+
+// Validate executable path
+bool ValidateExecutablePath(const std::wstring& exePath) {
+    DWORD fileAttributes = GetFileAttributesW(exePath.c_str());
+    
+    if (fileAttributes == INVALID_FILE_ATTRIBUTES) {
+        std::wcerr << L"[-] Executable not found at: " << exePath << std::endl;
+        std::wcerr << L"    Error: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
 void SimulateShellcodeInjection() {
     std::wcout << L"==================================================" << std::endl;
     std::wcout << L"    EDR Test: Shellcode Injection Technique" << std::endl;
@@ -130,26 +164,35 @@ void LaunchCalcWithShellcode() {
 
     std::wcout << L"[*] Demonstrating benign process creation (calc.exe)..." << std::endl;
     
+    std::wstring calcPath = L"C:\\Windows\\System32\\calc.exe";
+    
+    // Validate path exists
+    if (!ValidateExecutablePath(calcPath)) {
+        std::wcerr << L"[-] Cannot proceed: calc.exe not found" << std::endl;
+        return;
+    }
+    
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
 
     if (CreateProcessW(
-        L"C:\\Windows\\System32\\calc.exe",
+        calcPath.c_str(),
         NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        
+        HandleGuard processGuard(pi.hProcess);
+        HandleGuard threadGuard(pi.hThread);
         
         std::wcout << L"[+] Calculator launched (PID: " << pi.dwProcessId << L")" << std::endl;
         std::wcout << L"    [!] EDR should log this process creation" << std::endl;
         
         Sleep(2000);
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         
         std::wcout << L"[+] Process terminated" << std::endl;
     } else {
-        std::wcerr << L"[-] Failed to launch calculator" << std::endl;
+        std::wcerr << L"[-] Failed to launch calculator. Error: " << GetLastError() << std::endl;
     }
 }
 
