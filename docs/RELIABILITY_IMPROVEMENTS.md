@@ -88,6 +88,8 @@ bool ValidateDllPath(const std::wstring& dllPath) {
 - Validates files exist before attempting operations
 - Checks that paths point to files, not directories
 
+**Note:** The validation checks file existence and basic attributes. For production use, additional checks (e.g., `GetBinaryType()` for executables) could be added, but for EDR testing purposes, the current validation is sufficient.
+
 **Validated Paths:**
 - `C:\Windows\System32\notepad.exe`
 - `C:\Windows\System32\calc.exe`
@@ -206,7 +208,7 @@ if (!ValidateDllPath(dllPath)) {
 ```cpp
 // Ensure memory cleanup on error
 bool success = false;
-auto memoryCleanup = [&]() {
+auto memoryCleanup = [&pRemoteMemory, &hProcess]() {
     if (pRemoteMemory) {
         VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
     }
@@ -228,6 +230,8 @@ memoryCleanup(); // Always cleanup at end
 - Guaranteed memory cleanup
 - Works with early returns
 - Clear cleanup semantics
+
+**Note:** The lambda captures only the specific variables needed (`pRemoteMemory` and `hProcess`) to avoid potential issues with reference lifetime. The lambda is only used within the same function scope where these variables are defined.
 
 ## Files Modified
 

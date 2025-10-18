@@ -132,7 +132,7 @@ bool InjectDLL(DWORD processId, const std::wstring& dllPath) {
 
     // Ensure memory cleanup on error
     bool success = false;
-    auto memoryCleanup = [&]() {
+    auto memoryCleanup = [&pRemoteMemory, &hProcess]() {
         if (pRemoteMemory) {
             VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
         }

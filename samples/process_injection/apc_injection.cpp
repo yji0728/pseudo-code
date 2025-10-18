@@ -168,9 +168,9 @@ void SimulateApcInjection() {
                << (DWORD_PTR)pRemoteMemory << std::dec << std::endl;
 
     // Ensure memory cleanup
-    auto memoryCleanup = [&]() {
+    auto memoryCleanup = [&pRemoteMemory, piProcess = pi.hProcess]() {
         if (pRemoteMemory) {
-            VirtualFreeEx(pi.hProcess, pRemoteMemory, 0, MEM_RELEASE);
+            VirtualFreeEx(piProcess, pRemoteMemory, 0, MEM_RELEASE);
         }
     };
 
