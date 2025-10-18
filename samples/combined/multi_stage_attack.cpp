@@ -20,6 +20,40 @@
 #include <vector>
 #include <string>
 
+// RAII wrapper for HANDLE to ensure automatic cleanup
+class HandleGuard {
+private:
+    HANDLE handle;
+    
+public:
+    HandleGuard(HANDLE h) : handle(h) {}
+    ~HandleGuard() {
+        if (handle && handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+    
+    HANDLE get() const { return handle; }
+    bool isValid() const { return handle && handle != INVALID_HANDLE_VALUE; }
+    
+    // Prevent copying
+    HandleGuard(const HandleGuard&) = delete;
+    HandleGuard& operator=(const HandleGuard&) = delete;
+};
+
+// Validate executable path
+bool ValidateExecutablePath(const std::wstring& exePath) {
+    DWORD fileAttributes = GetFileAttributesW(exePath.c_str());
+    
+    if (fileAttributes == INVALID_FILE_ATTRIBUTES) {
+        std::wcerr << L"[-] Executable not found at: " << exePath << std::endl;
+        std::wcerr << L"    Error: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
 class EDRTestSuite {
 private:
     struct ProcessInfo {
@@ -45,6 +79,7 @@ private:
         std::wcout << L"\n[1.1] Enumerating running processes..." << std::endl;
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (hSnapshot != INVALID_HANDLE_VALUE) {
+            HandleGuard snapshotGuard(hSnapshot);
             PROCESSENTRY32W pe;
             pe.dwSize = sizeof(PROCESSENTRY32W);
 
@@ -58,8 +93,9 @@ private:
                     count++;
                 } while (Process32NextW(hSnapshot, &pe) && count < 10);
             }
-            CloseHandle(hSnapshot);
             std::wcout << L"    [+] Found " << processes.size() << L" processes (showing first 10)" << std::endl;
+        } else {
+            std::wcerr << L"    [-] Failed to enumerate processes. Error: " << GetLastError() << std::endl;
         }
 
         std::wcout << L"\n[1.2] Checking for security products..." << std::endl;
@@ -84,6 +120,8 @@ private:
         DWORD size = 256;
         if (GetComputerNameW(computerName, &size)) {
             std::wcout << L"    Computer Name: " << computerName << std::endl;
+        } else {
+            std::wcerr << L"    [-] Failed to get computer name. Error: " << GetLastError() << std::endl;
         }
 
         SYSTEM_INFO sysInfo;
@@ -109,9 +147,13 @@ private:
             if (VirtualProtect(memory, payloadSize, PAGE_EXECUTE_READ, &oldProtect)) {
                 std::wcout << L"    [+] Memory protection changed to RX" << std::endl;
                 std::wcout << L"    [!] EDR should detect RW->RX transition" << std::endl;
+            } else {
+                std::wcerr << L"    [-] Failed to change memory protection. Error: " << GetLastError() << std::endl;
             }
 
             VirtualFree(memory, 0, MEM_RELEASE);
+        } else {
+            std::wcerr << L"    [-] Failed to allocate memory. Error: " << GetLastError() << std::endl;
         }
 
         std::wcout << L"\n[2.3] Simulating obfuscation techniques..." << std::endl;
@@ -127,17 +169,29 @@ private:
         std::wcout << L"============================================" << std::endl;
 
         std::wcout << L"\n[3.1] Creating target process (notepad.exe)..." << std::endl;
+        
+        std::wstring notepadPath = L"C:\\Windows\\System32\\notepad.exe";
+        
+        // Validate path exists
+        if (!ValidateExecutablePath(notepadPath)) {
+            std::wcerr << L"    [-] Cannot proceed: notepad.exe not found" << std::endl;
+            return;
+        }
+        
         STARTUPINFOW si = { sizeof(si) };
         PROCESS_INFORMATION pi;
         ZeroMemory(&si, sizeof(si));
         ZeroMemory(&pi, sizeof(pi));
 
         if (!CreateProcessW(
-            L"C:\\Windows\\System32\\notepad.exe",
+            notepadPath.c_str(),
             NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
-            std::wcerr << L"    [-] Failed to create process" << std::endl;
+            std::wcerr << L"    [-] Failed to create process. Error: " << GetLastError() << std::endl;
             return;
         }
+
+        HandleGuard processGuard(pi.hProcess);
+        HandleGuard threadGuard(pi.hThread);
 
         std::wcout << L"    [+] Process created in suspended state (PID: " << pi.dwProcessId << L")" << std::endl;
         std::wcout << L"    [!] EDR should flag CREATE_SUSPENDED" << std::endl;
@@ -157,8 +211,6 @@ private:
 
         std::wcout << L"\n[3.4] Terminating test process..." << std::endl;
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         std::wcout << L"    [+] Process terminated" << std::endl;
     }
 
@@ -168,14 +220,26 @@ private:
         std::wcout << L"============================================" << std::endl;
 
         std::wcout << L"\n[4.1] Launching final payload (calc.exe)..." << std::endl;
+        
+        std::wstring calcPath = L"C:\\Windows\\System32\\calc.exe";
+        
+        // Validate path exists
+        if (!ValidateExecutablePath(calcPath)) {
+            std::wcerr << L"    [-] Cannot proceed: calc.exe not found" << std::endl;
+            return;
+        }
+        
         STARTUPINFOW si = { sizeof(si) };
         PROCESS_INFORMATION pi;
         ZeroMemory(&si, sizeof(si));
         ZeroMemory(&pi, sizeof(pi));
 
         if (CreateProcessW(
-            L"C:\\Windows\\System32\\calc.exe",
+            calcPath.c_str(),
             NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            
+            HandleGuard processGuard(pi.hProcess);
+            HandleGuard threadGuard(pi.hThread);
             
             std::wcout << L"    [+] Calculator launched (PID: " << pi.dwProcessId << L")" << std::endl;
             std::wcout << L"    [!] EDR should correlate this with previous activities" << std::endl;
@@ -184,9 +248,9 @@ private:
             
             std::wcout << L"\n[4.2] Cleaning up..." << std::endl;
             TerminateProcess(pi.hProcess, 0);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
             std::wcout << L"    [+] Payload terminated" << std::endl;
+        } else {
+            std::wcerr << L"    [-] Failed to launch calculator. Error: " << GetLastError() << std::endl;
         }
     }
 
