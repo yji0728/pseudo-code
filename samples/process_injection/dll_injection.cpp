@@ -17,31 +17,86 @@
 #include <tlhelp32.h>
 #include <iostream>
 #include <string>
+#include <memory>
 
-// Find process ID by name
+// RAII wrapper for HANDLE to ensure automatic cleanup
+class HandleGuard {
+private:
+    HANDLE handle;
+    
+public:
+    HandleGuard(HANDLE h) : handle(h) {}
+    ~HandleGuard() {
+        if (handle && handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+    
+    HANDLE get() const { return handle; }
+    bool isValid() const { return handle && handle != INVALID_HANDLE_VALUE; }
+    
+    // Prevent copying
+    HandleGuard(const HandleGuard&) = delete;
+    HandleGuard& operator=(const HandleGuard&) = delete;
+};
+
+// Find process ID by name with improved error logging
 DWORD FindProcessId(const std::wstring& processName) {
     PROCESSENTRY32W processEntry;
     processEntry.dwSize = sizeof(PROCESSENTRY32W);
 
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
+        std::wcerr << L"[-] Failed to create process snapshot. Error: " << GetLastError() << std::endl;
         return 0;
     }
+
+    HandleGuard snapshotGuard(snapshot);
 
     if (Process32FirstW(snapshot, &processEntry)) {
         do {
             if (processName == processEntry.szExeFile) {
-                CloseHandle(snapshot);
                 return processEntry.th32ProcessID;
             }
         } while (Process32NextW(snapshot, &processEntry));
     }
 
-    CloseHandle(snapshot);
     return 0;
 }
 
-// Perform DLL injection
+// Validate DLL path existence and accessibility
+bool ValidateDllPath(const std::wstring& dllPath) {
+    DWORD fileAttributes = GetFileAttributesW(dllPath.c_str());
+    
+    if (fileAttributes == INVALID_FILE_ATTRIBUTES) {
+        std::wcerr << L"[-] DLL file not found or inaccessible: " << dllPath << std::endl;
+        std::wcerr << L"    Error: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    if (fileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        std::wcerr << L"[-] Path is a directory, not a file: " << dllPath << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
+// Validate executable path for test mode
+bool ValidateExecutablePath(const std::wstring& exePath) {
+    DWORD fileAttributes = GetFileAttributesW(exePath.c_str());
+    
+    if (fileAttributes == INVALID_FILE_ATTRIBUTES) {
+        // Try common alternative locations
+        std::wcerr << L"[-] Executable not found at: " << exePath << std::endl;
+        std::wcerr << L"    Error: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
+// Perform DLL injection with improved resource management
 bool InjectDLL(DWORD processId, const std::wstring& dllPath) {
     std::wcout << L"[*] Target Process ID: " << processId << std::endl;
     std::wcout << L"[*] DLL Path: " << dllPath << std::endl;
@@ -58,6 +113,7 @@ bool InjectDLL(DWORD processId, const std::wstring& dllPath) {
         std::wcerr << L"[-] Failed to open process. Error: " << GetLastError() << std::endl;
         return false;
     }
+    HandleGuard processGuard(hProcess);
     std::wcout << L"[+] Process opened successfully" << std::endl;
 
     // Step 2: Allocate memory in target process
@@ -70,17 +126,23 @@ bool InjectDLL(DWORD processId, const std::wstring& dllPath) {
 
     if (!pRemoteMemory) {
         std::wcerr << L"[-] Failed to allocate memory. Error: " << GetLastError() << std::endl;
-        CloseHandle(hProcess);
         return false;
     }
     std::wcout << L"[+] Memory allocated at: 0x" << std::hex << pRemoteMemory << std::dec << std::endl;
+
+    // Ensure memory cleanup on error
+    bool success = false;
+    auto memoryCleanup = [&pRemoteMemory, &hProcess]() {
+        if (pRemoteMemory) {
+            VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
+        }
+    };
 
     // Step 3: Write DLL path to target process memory
     std::wcout << L"[3] Writing DLL path to target process..." << std::endl;
     if (!WriteProcessMemory(hProcess, pRemoteMemory, dllPath.c_str(), dllPathSize, NULL)) {
         std::wcerr << L"[-] Failed to write memory. Error: " << GetLastError() << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
+        memoryCleanup();
         return false;
     }
     std::wcout << L"[+] DLL path written successfully" << std::endl;
@@ -88,12 +150,17 @@ bool InjectDLL(DWORD processId, const std::wstring& dllPath) {
     // Step 4: Get address of LoadLibraryW
     std::wcout << L"[4] Getting LoadLibraryW address..." << std::endl;
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hKernel32) {
+        std::wcerr << L"[-] Failed to get kernel32.dll handle. Error: " << GetLastError() << std::endl;
+        memoryCleanup();
+        return false;
+    }
+    
     LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(hKernel32, "LoadLibraryW");
     
     if (!pLoadLibraryW) {
-        std::wcerr << L"[-] Failed to get LoadLibraryW address" << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
+        std::wcerr << L"[-] Failed to get LoadLibraryW address. Error: " << GetLastError() << std::endl;
+        memoryCleanup();
         return false;
     }
     std::wcout << L"[+] LoadLibraryW address: 0x" << std::hex << pLoadLibraryW << std::dec << std::endl;
@@ -108,23 +175,36 @@ bool InjectDLL(DWORD processId, const std::wstring& dllPath) {
 
     if (!hThread) {
         std::wcerr << L"[-] Failed to create remote thread. Error: " << GetLastError() << std::endl;
-        VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
+        memoryCleanup();
         return false;
     }
+    HandleGuard threadGuard(hThread);
     std::wcout << L"[+] Remote thread created successfully" << std::endl;
 
-    // Wait for thread to complete
-    WaitForSingleObject(hThread, INFINITE);
+    // Wait for thread to complete with timeout (30 seconds)
+    std::wcout << L"[*] Waiting for thread completion (30 second timeout)..." << std::endl;
+    DWORD waitResult = WaitForSingleObject(hThread, 30000);
     
-    std::wcout << L"[+] DLL injection completed" << std::endl;
+    switch (waitResult) {
+        case WAIT_OBJECT_0:
+            std::wcout << L"[+] DLL injection completed successfully" << std::endl;
+            success = true;
+            break;
+        case WAIT_TIMEOUT:
+            std::wcerr << L"[-] Thread wait timeout after 30 seconds" << std::endl;
+            break;
+        case WAIT_FAILED:
+            std::wcerr << L"[-] Wait failed. Error: " << GetLastError() << std::endl;
+            break;
+        default:
+            std::wcerr << L"[-] Unexpected wait result: " << waitResult << std::endl;
+            break;
+    }
 
     // Cleanup
-    CloseHandle(hThread);
-    VirtualFreeEx(hProcess, pRemoteMemory, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
+    memoryCleanup();
 
-    return true;
+    return success;
 }
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -150,12 +230,22 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcout << L"[*] Running in test mode..." << std::endl;
         std::wcout << L"[*] Spawning notepad.exe..." << std::endl;
         
+        // Validate notepad.exe path before attempting to spawn
+        std::wstring notepadPath = L"C:\\Windows\\System32\\notepad.exe";
+        if (!ValidateExecutablePath(notepadPath)) {
+            std::wcerr << L"[-] Cannot proceed: notepad.exe not found" << std::endl;
+            return 1;
+        }
+        
         STARTUPINFOW si = { sizeof(si) };
         PROCESS_INFORMATION pi;
         
         if (CreateProcessW(
-            L"C:\\Windows\\System32\\notepad.exe",
+            notepadPath.c_str(),
             NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            
+            HandleGuard processGuard(pi.hProcess);
+            HandleGuard threadGuard(pi.hThread);
             
             std::wcout << L"[+] Notepad spawned with PID: " << pi.dwProcessId << std::endl;
             std::wcout << L"[*] Simulating injection steps (API calls that EDR should detect):" << std::endl;
@@ -168,17 +258,22 @@ int wmain(int argc, wchar_t* argv[]) {
             
             Sleep(2000);
             TerminateProcess(pi.hProcess, 0);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
             
             std::wcout << L"[+] Test completed. EDR should log these activities." << std::endl;
         } else {
-            std::wcerr << L"[-] Failed to spawn notepad.exe" << std::endl;
+            std::wcerr << L"[-] Failed to spawn notepad.exe. Error: " << GetLastError() << std::endl;
+            return 1;
         }
         return 0;
     }
 
     // Real injection mode
+    // Validate process name is not empty
+    if (targetProcess.empty()) {
+        std::wcerr << L"[-] Invalid process name (empty string)" << std::endl;
+        return 1;
+    }
+    
     DWORD pid = FindProcessId(targetProcess);
     if (pid == 0) {
         std::wcerr << L"[-] Process not found: " << targetProcess << std::endl;
@@ -188,6 +283,17 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wstring dllPath;
     if (argc >= 3) {
         dllPath = argv[2];
+        
+        // Validate DLL path
+        if (dllPath.empty()) {
+            std::wcerr << L"[-] Invalid DLL path (empty string)" << std::endl;
+            return 1;
+        }
+        
+        if (!ValidateDllPath(dllPath)) {
+            std::wcerr << L"[-] DLL validation failed" << std::endl;
+            return 1;
+        }
     } else {
         std::wcerr << L"[-] DLL path required for injection" << std::endl;
         return 1;
@@ -197,6 +303,7 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcout << L"\n[SUCCESS] EDR should have detected this injection attempt!" << std::endl;
     } else {
         std::wcerr << L"\n[FAILED] Injection failed" << std::endl;
+        return 1;
     }
 
     return 0;

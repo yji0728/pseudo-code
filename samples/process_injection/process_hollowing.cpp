@@ -23,6 +23,40 @@
 typedef NTSTATUS(NTAPI* pNtUnmapViewOfSection)(HANDLE, PVOID);
 typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
 
+// RAII wrapper for HANDLE to ensure automatic cleanup
+class HandleGuard {
+private:
+    HANDLE handle;
+    
+public:
+    HandleGuard(HANDLE h) : handle(h) {}
+    ~HandleGuard() {
+        if (handle && handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+    
+    HANDLE get() const { return handle; }
+    bool isValid() const { return handle && handle != INVALID_HANDLE_VALUE; }
+    
+    // Prevent copying
+    HandleGuard(const HandleGuard&) = delete;
+    HandleGuard& operator=(const HandleGuard&) = delete;
+};
+
+// Validate executable path
+bool ValidateExecutablePath(const std::wstring& exePath) {
+    DWORD fileAttributes = GetFileAttributesW(exePath.c_str());
+    
+    if (fileAttributes == INVALID_FILE_ATTRIBUTES) {
+        std::wcerr << L"[-] Executable not found at: " << exePath << std::endl;
+        std::wcerr << L"    Error: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
 void SimulateProcessHollowing() {
     std::wcout << L"==================================================" << std::endl;
     std::wcout << L"    EDR Test: Process Hollowing Technique" << std::endl;
@@ -38,10 +72,16 @@ void SimulateProcessHollowing() {
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
 
-    wchar_t targetPath[] = L"C:\\Windows\\System32\\calc.exe";
+    std::wstring targetPath = L"C:\\Windows\\System32\\calc.exe";
+    
+    // Validate path exists
+    if (!ValidateExecutablePath(targetPath)) {
+        std::wcerr << L"[-] Cannot proceed: calc.exe not found" << std::endl;
+        return;
+    }
     
     if (!CreateProcessW(
-        targetPath,
+        targetPath.c_str(),
         NULL,
         NULL,
         NULL,
@@ -55,6 +95,10 @@ void SimulateProcessHollowing() {
         return;
     }
 
+    // Use RAII for automatic cleanup
+    HandleGuard processGuard(pi.hProcess);
+    HandleGuard threadGuard(pi.hThread);
+
     std::wcout << L"[+] Process created in suspended state" << std::endl;
     std::wcout << L"    PID: " << pi.dwProcessId << std::endl;
     std::wcout << L"    Thread ID: " << pi.dwThreadId << std::endl;
@@ -65,10 +109,8 @@ void SimulateProcessHollowing() {
     ctx.ContextFlags = CONTEXT_FULL;
     
     if (!GetThreadContext(pi.hThread, &ctx)) {
-        std::wcerr << L"[-] Failed to get thread context" << std::endl;
+        std::wcerr << L"[-] Failed to get thread context. Error: " << GetLastError() << std::endl;
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         return;
     }
     std::wcout << L"[+] Thread context retrieved" << std::endl;
@@ -83,8 +125,14 @@ void SimulateProcessHollowing() {
     if (hNtdll) {
         pNtUnmapViewOfSection NtUnmapViewOfSection = 
             (pNtUnmapViewOfSection)GetProcAddress(hNtdll, "NtUnmapViewOfSection");
-        std::wcout << L"[+] NtUnmapViewOfSection address: 0x" << std::hex 
-                   << (DWORD_PTR)NtUnmapViewOfSection << std::dec << std::endl;
+        if (NtUnmapViewOfSection) {
+            std::wcout << L"[+] NtUnmapViewOfSection address: 0x" << std::hex 
+                       << (DWORD_PTR)NtUnmapViewOfSection << std::dec << std::endl;
+        } else {
+            std::wcerr << L"[-] Failed to get NtUnmapViewOfSection address. Error: " << GetLastError() << std::endl;
+        }
+    } else {
+        std::wcerr << L"[-] Failed to get ntdll.dll handle. Error: " << GetLastError() << std::endl;
     }
 
     // Step 4: Simulate memory allocation
@@ -104,6 +152,8 @@ void SimulateProcessHollowing() {
         std::wcout << L"[+] Memory allocated at: 0x" << std::hex 
                    << (DWORD_PTR)pRemoteImage << std::dec << std::endl;
         VirtualFreeEx(pi.hProcess, pRemoteImage, 0, MEM_RELEASE);
+    } else {
+        std::wcerr << L"[-] Failed to allocate memory. Error: " << GetLastError() << std::endl;
     }
 
     // Step 5: Demonstrate WriteProcessMemory
@@ -123,8 +173,6 @@ void SimulateProcessHollowing() {
     // Cleanup
     std::wcout << L"\n[*] Cleaning up test process..." << std::endl;
     TerminateProcess(pi.hProcess, 0);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
 
     std::wcout << L"\n[+] Test completed!" << std::endl;
     std::wcout << L"\nEDR Detection Points:" << std::endl;

